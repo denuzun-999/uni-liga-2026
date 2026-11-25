@@ -12,6 +12,7 @@ import {
 import type { User } from '@supabase/supabase-js'
 import {
   Shield,
+  ShieldCheck,
   Users,
   Trophy,
   Calendar,
@@ -31,6 +32,7 @@ import {
   History,
   Target,
   UserPlus,
+  UserMinus,
   Mail,
   Lock,
   Megaphone,
@@ -59,8 +61,13 @@ import MatchDetailModal, {
   type MatchAssistRow,
   type MatchGoalRow,
 } from './MatchDetailModal'
-import PlayerPoolPage, { type FreeAgentApplication } from './PlayerPoolPage'
+import PlayerPoolPage, {
+  type ConfirmRequest,
+  type FreeAgentApplication,
+  type TeamInvite,
+} from './PlayerPoolPage'
 import KnockoutBracketSection from './KnockoutBracketSection'
+import ConfirmModal from './ConfirmModal'
 
 type Profile = {
   id: string
@@ -108,6 +115,7 @@ type Team = {
   primary_color: string | null
   description: string | null
   captain_id: string | null
+  co_captain_id: string | null
   captain_invite_code: string | null
   league_id: number | null
   group_id: number | null
@@ -826,12 +834,20 @@ type PortalContext = {
   matchAssists: MatchAssistRow[]
   players: Player[]
   freeAgents: FreeAgentApplication[]
+  teamInvites: TeamInvite[]
   announcements: TeamAnnouncement[]
   backgrounds: SiteBackground[]
   loading: boolean
   refreshAll: () => Promise<void>
   openAuthModal: (initialMode?: 'login' | 'signup') => void
   openMatchModal: (matchId: number) => void
+  askConfirm: (req: ConfirmRequest) => void
+}
+
+function isTeamManager(user: User | null, profile: Profile | null, team?: Team | null) {
+  if (profile?.role === 'admin') return true
+  if (!user || !team) return false
+  return team.captain_id === user.id || team.co_captain_id === user.id
 }
 
 function getSurfaceClasses() {
@@ -1912,13 +1928,18 @@ function LeagueDetailPage({ ctx }: { ctx: PortalContext }) {
   const archived = isLeagueArchived(league)
   const playedCount = playableLeagueMatches.filter((m) => m.status === 'played').length
 
-  async function handleDeleteMatch(matchId: number) {
-    const ok = window.confirm('Delete this match and its goals/assists?')
-    if (!ok) return
-    setDeletingMatchId(matchId)
-    await supabase.from('matches').delete().eq('id', matchId)
-    await ctx.refreshAll()
-    setDeletingMatchId(null)
+  function handleDeleteMatch(matchId: number) {
+    ctx.askConfirm({
+      title: 'Delete Match?',
+      message: 'Are you sure you want to delete this match along with its goals and assists?',
+      confirmLabel: 'Yes, Delete Match',
+      onConfirm: async () => {
+        setDeletingMatchId(matchId)
+        await supabase.from('matches').delete().eq('id', matchId)
+        await ctx.refreshAll()
+        setDeletingMatchId(null)
+      },
+    })
   }
 
   return (
@@ -2204,12 +2225,15 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
   const teamMap = new Map(ctx.teams.map((t) => [t.id, t.name]))
 
-  const canManage =
+  const canManage = isTeamManager(ctx.user, ctx.profile, team)
+  const isMainCaptainOrAdmin =
     ctx.profile?.role === 'admin' ||
     (!!ctx.user && !!team?.captain_id && ctx.user.id === team.captain_id)
+  const myPlayerInTeam = ctx.user
+    ? teamPlayers.find((p) => p.user_id === ctx.user!.id)
+    : undefined
 
-  const isTeamMember =
-    canManage || (!!ctx.user && teamPlayers.some((p) => p.user_id === ctx.user!.id))
+  const isTeamMember = canManage || !!myPlayerInTeam
 
   const [teamName, setTeamName] = useState('')
   const [teamDesc, setTeamDesc] = useState('')
@@ -2283,17 +2307,24 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
     }
   }
 
-  async function handleRemoveLogo() {
-    setUploadingLogo(true)
-    setFeedback(null)
-    setErrorMsg(null)
-    const { error } = await supabase.from('teams').update({ logo_url: null }).eq('id', team!.id)
-    if (error) setErrorMsg(error.message)
-    else {
-      setFeedback('Team crest removed.')
-      await ctx.refreshAll()
-    }
-    setUploadingLogo(false)
+  function handleRemoveLogo() {
+    ctx.askConfirm({
+      title: 'Remove Team Crest?',
+      message: `Are you sure you want to remove the crest of "${team!.name}"?`,
+      confirmLabel: 'Remove Crest',
+      onConfirm: async () => {
+        setUploadingLogo(true)
+        setFeedback(null)
+        setErrorMsg(null)
+        const { error } = await supabase.from('teams').update({ logo_url: null }).eq('id', team!.id)
+        if (error) setErrorMsg(error.message)
+        else {
+          setFeedback('Team crest removed.')
+          await ctx.refreshAll()
+        }
+        setUploadingLogo(false)
+      },
+    })
   }
 
   async function handleCoverUpload(file: File) {
@@ -2313,17 +2344,24 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
     }
   }
 
-  async function handleRemoveCover() {
-    setUploadingCover(true)
-    setFeedback(null)
-    setErrorMsg(null)
-    const { error } = await supabase.from('teams').update({ cover_url: null }).eq('id', team!.id)
-    if (error) setErrorMsg(error.message)
-    else {
-      setFeedback('Cover photo removed.')
-      await ctx.refreshAll()
-    }
-    setUploadingCover(false)
+  function handleRemoveCover() {
+    ctx.askConfirm({
+      title: 'Remove Cover Photo?',
+      message: `Are you sure you want to remove the cover photo of "${team!.name}"?`,
+      confirmLabel: 'Remove Cover',
+      onConfirm: async () => {
+        setUploadingCover(true)
+        setFeedback(null)
+        setErrorMsg(null)
+        const { error } = await supabase.from('teams').update({ cover_url: null }).eq('id', team!.id)
+        if (error) setErrorMsg(error.message)
+        else {
+          setFeedback('Cover photo removed.')
+          await ctx.refreshAll()
+        }
+        setUploadingCover(false)
+      },
+    })
   }
 
   async function handleAddPlayer(e: FormEvent) {
@@ -2413,29 +2451,98 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
     }
   }
 
-  async function handleRemovePlayerFromTeam(player: Player) {
-    setFeedback(null)
-    setErrorMsg(null)
-    if (player.user_id) {
-      const { error } = await supabase
-        .from('players')
-        .update({ team_id: null })
-        .eq('id', player.id)
-      if (error) setErrorMsg(error.message)
-      else {
+  function handleRemovePlayerFromTeam(player: Player) {
+    if (team!.captain_id && player.user_id === team!.captain_id) {
+      setErrorMsg('The main captain cannot be removed from the squad here.')
+      return
+    }
+    ctx.askConfirm({
+      title: 'Remove Player from Squad?',
+      message: `Remove ${player.full_name} from "${team!.name}"? They will move to the general Player Pool as a Free Agent with all stats preserved.`,
+      confirmLabel: 'Yes, Remove Player',
+      onConfirm: async () => {
+        setFeedback(null)
+        setErrorMsg(null)
+        const { error } = await supabase
+          .from('players')
+          .update({ team_id: null })
+          .eq('id', player.id)
+        if (error) {
+          setErrorMsg(error.message)
+          return
+        }
+        if (player.user_id && team!.co_captain_id === player.user_id) {
+          await supabase.from('teams').update({ co_captain_id: null }).eq('id', team!.id)
+        }
         setFeedback(
-          `${player.full_name} removed from squad (Player ID #${player.id} and stats preserved).`
+          `${player.full_name} was moved to the Player Pool (Free Agent). Stats and ID #${player.id} preserved.`
         )
         await ctx.refreshAll()
-      }
-    } else {
-      const { error } = await supabase.from('players').delete().eq('id', player.id)
-      if (error) setErrorMsg(error.message)
-      else {
-        setFeedback('Player removed from squad.')
+      },
+    })
+  }
+
+  function handleLeaveTeam() {
+    if (!myPlayerInTeam || !ctx.user) return
+    const isLeavingMainCaptain = team!.captain_id === ctx.user.id
+    ctx.askConfirm({
+      title: 'Leave Team?',
+      message: isLeavingMainCaptain
+        ? `You are the main captain of "${team!.name}". If you leave, you will move to the Player Pool and the team will have no captain until reassigned. Continue?`
+        : `Are you sure you want to leave "${team!.name}"? You will move to the general Player Pool as a Free Agent.`,
+      confirmLabel: 'Yes, Leave Team',
+      tone: 'warning',
+      onConfirm: async () => {
+        setFeedback(null)
+        setErrorMsg(null)
+        const { error } = await supabase
+          .from('players')
+          .update({ team_id: null })
+          .eq('id', myPlayerInTeam.id)
+        if (error) {
+          setErrorMsg(error.message)
+          return
+        }
+        if (team!.co_captain_id === ctx.user!.id) {
+          await supabase.from('teams').update({ co_captain_id: null }).eq('id', team!.id)
+        }
+        if (team!.captain_id === ctx.user!.id) {
+          await supabase.from('teams').update({ captain_id: null }).eq('id', team!.id)
+        }
+        setFeedback(`You left "${team!.name}" and moved to the Player Pool.`)
         await ctx.refreshAll()
-      }
-    }
+      },
+    })
+  }
+
+  function handleToggleCoCaptain(player: Player) {
+    if (!player.user_id) return
+    const isCurrentlyCoCaptain = team!.co_captain_id === player.user_id
+    ctx.askConfirm({
+      title: isCurrentlyCoCaptain ? 'Remove 2nd Captain?' : 'Appoint 2nd Captain?',
+      message: isCurrentlyCoCaptain
+        ? `Remove 2nd Captain permissions from ${player.full_name}?`
+        : `Make ${player.full_name} the 2nd Captain of "${team!.name}"? They will be able to manage squad, invites, announcements, and match scores.`,
+      confirmLabel: isCurrentlyCoCaptain ? 'Remove Role' : 'Appoint 2nd Captain',
+      tone: 'warning',
+      onConfirm: async () => {
+        setFeedback(null)
+        setErrorMsg(null)
+        const { error } = await supabase
+          .from('teams')
+          .update({ co_captain_id: isCurrentlyCoCaptain ? null : player.user_id })
+          .eq('id', team!.id)
+        if (error) setErrorMsg(error.message)
+        else {
+          setFeedback(
+            isCurrentlyCoCaptain
+              ? `${player.full_name} is no longer 2nd Captain.`
+              : `${player.full_name} is now 2nd Captain of "${team!.name}".`
+          )
+          await ctx.refreshAll()
+        }
+      },
+    })
   }
 
   async function handlePostAnnouncement(e: FormEvent) {
@@ -2462,15 +2569,22 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
     setSavingAnn(false)
   }
 
-  async function handleDeleteAnnouncement(annId: number) {
-    setFeedback(null)
-    setErrorMsg(null)
-    const { error } = await supabase.from('team_announcements').delete().eq('id', annId)
-    if (error) setErrorMsg(error.message)
-    else {
-      setFeedback('Announcement deleted.')
-      await ctx.refreshAll()
-    }
+  function handleDeleteAnnouncement(annId: number) {
+    ctx.askConfirm({
+      title: 'Delete Announcement?',
+      message: 'Are you sure you want to delete this team announcement?',
+      confirmLabel: 'Yes, Delete',
+      onConfirm: async () => {
+        setFeedback(null)
+        setErrorMsg(null)
+        const { error } = await supabase.from('team_announcements').delete().eq('id', annId)
+        if (error) setErrorMsg(error.message)
+        else {
+          setFeedback('Announcement deleted.')
+          await ctx.refreshAll()
+        }
+      },
+    })
   }
 
   return (
@@ -2529,62 +2643,74 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
               </div>
             </div>
 
-            {canManage && (
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="cursor-pointer bg-white/10 border border-white/15 hover:bg-white/15 text-white px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition">
-                  <ImageIcon className="w-3.5 h-3.5" />
-                  {uploadingCover ? 'Uploading...' : 'Upload Cover'}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0]
-                      if (f) handleCoverUpload(f)
-                    }}
-                  />
-                </label>
-                {team.cover_url && (
-                  <button
-                    type="button"
-                    onClick={handleRemoveCover}
-                    className="bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-400/25 px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1 cursor-pointer transition"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" /> Remove Cover
-                  </button>
-                )}
+            <div className="flex flex-wrap items-center gap-2">
+              {canManage && (
+                <>
+                  <label className="cursor-pointer bg-white/10 border border-white/15 hover:bg-white/15 text-white px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition">
+                    <ImageIcon className="w-3.5 h-3.5" />
+                    {uploadingCover ? 'Uploading...' : 'Upload Cover'}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0]
+                        if (f) handleCoverUpload(f)
+                      }}
+                    />
+                  </label>
+                  {team.cover_url && (
+                    <button
+                      type="button"
+                      onClick={handleRemoveCover}
+                      className="bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-400/25 px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1 cursor-pointer transition"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Remove Cover
+                    </button>
+                  )}
 
-                <label className="cursor-pointer bg-white/10 border border-white/15 hover:bg-white/15 text-white px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition">
-                  <Upload className="w-3.5 h-3.5" />
-                  {uploadingLogo ? 'Uploading...' : 'Upload Crest'}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0]
-                      if (f) handleLogoUpload(f)
-                    }}
-                  />
-                </label>
-                {team.logo_url && (
+                  <label className="cursor-pointer bg-white/10 border border-white/15 hover:bg-white/15 text-white px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition">
+                    <Upload className="w-3.5 h-3.5" />
+                    {uploadingLogo ? 'Uploading...' : 'Upload Crest'}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0]
+                        if (f) handleLogoUpload(f)
+                      }}
+                    />
+                  </label>
+                  {team.logo_url && (
+                    <button
+                      type="button"
+                      onClick={handleRemoveLogo}
+                      className="bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-400/25 px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1 cursor-pointer transition"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Remove Crest
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={handleRemoveLogo}
-                    className="bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-400/25 px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1 cursor-pointer transition"
+                    onClick={() => setEditingTeam((v) => !v)}
+                    className="bg-[#D50C2F] hover:bg-[#b80927] text-white px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
                   >
-                    <Trash2 className="w-3.5 h-3.5" /> Remove Crest
+                    <Edit3 className="w-3.5 h-3.5" /> Edit Team
                   </button>
-                )}
+                </>
+              )}
+
+              {myPlayerInTeam && (
                 <button
                   type="button"
-                  onClick={() => setEditingTeam((v) => !v)}
-                  className="bg-[#D50C2F] hover:bg-[#b80927] text-white px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
+                  onClick={handleLeaveTeam}
+                  className="bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-400/30 px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
                 >
-                  <Edit3 className="w-3.5 h-3.5" /> Edit Team
+                  <LogOut className="w-3.5 h-3.5" /> Leave Team
                 </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
           {canManage && editingTeam && (
@@ -2739,7 +2865,7 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
               to="/pool"
               className="text-xs font-semibold text-emerald-400 hover:underline inline-flex items-center gap-1"
             >
-              <UserPlus className="w-3.5 h-3.5" /> Pick from Player Pool →
+              <UserPlus className="w-3.5 h-3.5" /> Invite from Player Pool →
             </Link>
           )}
         </div>
@@ -2832,6 +2958,10 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
                 const totalGoals = ctx.matchGoals.filter((g) => g.player_id === p.id).length
                 const totalAssists = ctx.matchAssists.filter((a) => a.player_id === p.id).length
                 const isSelf = !!ctx.user && p.user_id === ctx.user.id
+                const isCaptain = !!team.captain_id && p.user_id === team.captain_id
+                const isCoCaptain = !!team.co_captain_id && p.user_id === team.co_captain_id
+                const canKickThisPlayer = canManage && !isSelf && !isCaptain
+                const canPromoteCoCaptain = isMainCaptainOrAdmin && !!p.user_id && !isCaptain
 
                 return (
                   <div
@@ -2849,8 +2979,20 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
                         size="md"
                       />
                       <div className="min-w-0">
-                        <div className="font-semibold text-sm text-white truncate">
-                          {p.full_name}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-semibold text-sm text-white truncate">
+                            {p.full_name}
+                          </span>
+                          {isCaptain && (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-amber-300 bg-amber-500/15 border border-amber-400/35 px-1.5 py-0.5 rounded-md">
+                              <Crown className="w-2.5 h-2.5" /> C
+                            </span>
+                          )}
+                          {isCoCaptain && (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-sky-300 bg-sky-500/15 border border-sky-400/35 px-1.5 py-0.5 rounded-md">
+                              <ShieldCheck className="w-2.5 h-2.5" /> 2C
+                            </span>
+                          )}
                         </div>
                         <div className="text-xs text-slate-400 truncate mt-0.5 tabular-nums">
                           ID #{p.id} · {totalGoals}G {totalAssists}A
@@ -2873,16 +3015,32 @@ function TeamDetailPage({ ctx }: { ctx: PortalContext }) {
                       </div>
                     </Link>
 
-                    {canManage && !isSelf && (
-                      <button
-                        type="button"
-                        onClick={() => handleRemovePlayerFromTeam(p)}
-                        title={p.user_id ? 'Remove from Squad (Keep Profile)' : 'Delete Player'}
-                        className="text-rose-400 hover:bg-rose-500/15 p-2 rounded-xl cursor-pointer"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {canPromoteCoCaptain && (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleCoCaptain(p)}
+                          title={isCoCaptain ? 'Remove 2nd Captain' : 'Make 2nd Captain'}
+                          className={`p-2 rounded-xl cursor-pointer transition ${
+                            isCoCaptain
+                              ? 'text-sky-300 bg-sky-500/20 hover:bg-sky-500/30'
+                              : 'text-slate-400 hover:text-sky-300 hover:bg-sky-500/15'
+                          }`}
+                        >
+                          <ShieldCheck className="w-4 h-4" />
+                        </button>
+                      )}
+                      {canKickThisPlayer && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePlayerFromTeam(p)}
+                          title="Remove from Squad (Move to Player Pool)"
+                          className="text-rose-400 hover:bg-rose-500/15 p-2 rounded-xl cursor-pointer transition"
+                        >
+                          <UserMinus className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )
               })}
@@ -2956,8 +3114,7 @@ function PlayerDetailPage({ ctx }: { ctx: PortalContext }) {
   const team = player?.team_id ? ctx.teams.find((t) => t.id === player.team_id) : undefined
 
   const canManage =
-    ctx.profile?.role === 'admin' ||
-    (!!ctx.user && !!team?.captain_id && ctx.user.id === team.captain_id) ||
+    isTeamManager(ctx.user, ctx.profile, team) ||
     (!!ctx.user && !!player?.user_id && ctx.user.id === player.user_id)
 
   const [activeTab, setActiveTab] = useState<'career' | 'periods' | 'edit'>('career')
@@ -3128,16 +3285,26 @@ function PlayerDetailPage({ ctx }: { ctx: PortalContext }) {
     }
   }
 
-  async function handleRemovePhoto() {
-    setBusy(true)
-    setMsg(null)
-    const { error } = await supabase.from('players').update({ photo_url: null }).eq('id', player!.id)
-    if (error) setMsg(error.message)
-    else {
-      setMsg('Player photo removed.')
-      await ctx.refreshAll()
-    }
-    setBusy(false)
+  function handleRemovePhoto() {
+    ctx.askConfirm({
+      title: 'Remove Player Photo?',
+      message: `Are you sure you want to remove the photo of ${player!.full_name}?`,
+      confirmLabel: 'Remove Photo',
+      onConfirm: async () => {
+        setBusy(true)
+        setMsg(null)
+        const { error } = await supabase
+          .from('players')
+          .update({ photo_url: null })
+          .eq('id', player!.id)
+        if (error) setMsg(error.message)
+        else {
+          setMsg('Player photo removed.')
+          await ctx.refreshAll()
+        }
+        setBusy(false)
+      },
+    })
   }
 
   async function handleUpdatePlayer(e: FormEvent) {
@@ -3545,7 +3712,12 @@ function MyProfilePage({ ctx }: { ctx: PortalContext }) {
 
   const myTeam = myPlayer?.team_id ? ctx.teams.find((t) => t.id === myPlayer.team_id) : undefined
   const captainedTeams = useMemo(
-    () => (ctx.user ? ctx.teams.filter((t) => t.captain_id === ctx.user!.id) : []),
+    () =>
+      ctx.user
+        ? ctx.teams.filter(
+            (t) => t.captain_id === ctx.user!.id || t.co_captain_id === ctx.user!.id
+          )
+        : [],
     [ctx.user, ctx.teams]
   )
 
@@ -3777,15 +3949,18 @@ function MyProfilePage({ ctx }: { ctx: PortalContext }) {
             </p>
             {captainedTeams.length > 0 && (
               <div className="flex flex-wrap gap-2 pt-1">
-                {captainedTeams.map((ct) => (
-                  <Link
-                    key={ct.id}
-                    to={`/teams/${ct.id}`}
-                    className="text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-400/30 px-3 py-1 rounded-lg hover:underline"
-                  >
-                    Captain of: {ct.name} →
-                  </Link>
-                ))}
+                {captainedTeams.map((ct) => {
+                  const isMainCap = ct.captain_id === ctx.user!.id
+                  return (
+                    <Link
+                      key={ct.id}
+                      to={`/teams/${ct.id}`}
+                      className="text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-400/30 px-3 py-1 rounded-lg hover:underline"
+                    >
+                      {isMainCap ? 'Captain of' : '2nd Captain of'}: {ct.name} →
+                    </Link>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -4054,18 +4229,23 @@ function AdminPage({ ctx }: { ctx: PortalContext }) {
     setBgBusy(false)
   }
 
-  async function handleDeleteBackground(bg: SiteBackground) {
-    const ok = window.confirm(`Delete background "${bg.name}"?`)
-    if (!ok) return
-    setBgBusy(true)
-    setStatusMsg(null)
-    const { error } = await supabase.from('site_backgrounds').delete().eq('id', bg.id)
-    if (error) setStatusMsg(error.message)
-    else {
-      setStatusMsg(`Background "${bg.name}" removed.`)
-      await ctx.refreshAll()
-    }
-    setBgBusy(false)
+  function handleDeleteBackground(bg: SiteBackground) {
+    ctx.askConfirm({
+      title: 'Delete Background?',
+      message: `Are you sure you want to permanently delete "${bg.name}"?`,
+      confirmLabel: 'Yes, Delete',
+      onConfirm: async () => {
+        setBgBusy(true)
+        setStatusMsg(null)
+        const { error } = await supabase.from('site_backgrounds').delete().eq('id', bg.id)
+        if (error) setStatusMsg(error.message)
+        else {
+          setStatusMsg(`Background "${bg.name}" removed.`)
+          await ctx.refreshAll()
+        }
+        setBgBusy(false)
+      },
+    })
   }
 
   async function handleToggleArchive(lg: League) {
@@ -4093,22 +4273,24 @@ function AdminPage({ ctx }: { ctx: PortalContext }) {
     setBusy(false)
   }
 
-  async function handleSafeDeleteLeague(lg: League) {
-    const ok = window.confirm(
-      `Delete "${lg.name}"?\n\nGroups and matches for this competition will be removed; TEAMS AND PLAYERS WILL BE PRESERVED.`
-    )
-    if (!ok) return
-
-    setBusy(true)
-    setStatusMsg(null)
-
-    const { error } = await supabase.from('leagues').delete().eq('id', lg.id)
-    if (error) setStatusMsg(`Could not delete competition: ${error.message}`)
-    else {
-      setStatusMsg(`"${lg.name}" deleted. All teams and player records were preserved.`)
-      await ctx.refreshAll()
-    }
-    setBusy(false)
+  function handleSafeDeleteLeague(lg: League) {
+    ctx.askConfirm({
+      title: `Delete "${lg.name}"?`,
+      message:
+        'Groups and matches for this competition will be removed, while teams and players will be preserved.',
+      confirmLabel: 'Yes, Delete Competition',
+      onConfirm: async () => {
+        setBusy(true)
+        setStatusMsg(null)
+        const { error } = await supabase.from('leagues').delete().eq('id', lg.id)
+        if (error) setStatusMsg(`Could not delete competition: ${error.message}`)
+        else {
+          setStatusMsg(`"${lg.name}" deleted. All teams and player records were preserved.`)
+          await ctx.refreshAll()
+        }
+        setBusy(false)
+      },
+    })
   }
 
   async function handleAddTeam(e: FormEvent) {
@@ -4146,21 +4328,24 @@ function AdminPage({ ctx }: { ctx: PortalContext }) {
     }
   }
 
-  async function handleSafeDeleteTeam(tm: Team) {
-    const ok = window.confirm(
-      `Delete "${tm.name}"?\n\nPlayer IDs, profiles, and goal/assist statistics will NOT be deleted (players simply become free agents).`
-    )
-    if (!ok) return
-
-    setBusy(true)
-    setStatusMsg(null)
-    const { error } = await supabase.from('teams').delete().eq('id', tm.id)
-    if (error) setStatusMsg(`Could not delete team: ${error.message}`)
-    else {
-      setStatusMsg(`"${tm.name}" deleted. Player IDs and statistics were preserved.`)
-      await ctx.refreshAll()
-    }
-    setBusy(false)
+  function handleSafeDeleteTeam(tm: Team) {
+    ctx.askConfirm({
+      title: `Delete "${tm.name}"?`,
+      message:
+        'Player IDs, profiles, and goal/assist statistics will NOT be deleted — players will simply move to the Player Pool as Free Agents.',
+      confirmLabel: 'Yes, Delete Team',
+      onConfirm: async () => {
+        setBusy(true)
+        setStatusMsg(null)
+        const { error } = await supabase.from('teams').delete().eq('id', tm.id)
+        if (error) setStatusMsg(`Could not delete team: ${error.message}`)
+        else {
+          setStatusMsg(`"${tm.name}" deleted. Player IDs and statistics were preserved.`)
+          await ctx.refreshAll()
+        }
+        setBusy(false)
+      },
+    })
   }
 
   const teamMap = new Map(ctx.teams.map((t) => [t.id, t.name]))
@@ -4695,12 +4880,15 @@ function PortalApp() {
   const [matchAssists, setMatchAssists] = useState<MatchAssistRow[]>([])
   const [players, setPlayers] = useState<Player[]>([])
   const [freeAgents, setFreeAgents] = useState<FreeAgentApplication[]>([])
+  const [teamInvites, setTeamInvites] = useState<TeamInvite[]>([])
   const [announcements, setAnnouncements] = useState<TeamAnnouncement[]>([])
   const [backgrounds, setBackgrounds] = useState<SiteBackground[]>([])
   const [loading, setLoading] = useState(true)
   const [authModalOpen, setAuthModalOpen] = useState(false)
   const [authModalMode, setAuthModalMode] = useState<'login' | 'signup'>('login')
   const [activeMatchId, setActiveMatchId] = useState<number | null>(null)
+  const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
 
   async function refreshAll() {
     setLoading(true)
@@ -4715,6 +4903,7 @@ function PortalApp() {
       maRes,
       plRes,
       faRes,
+      invRes,
       annRes,
       bgRes,
     ] = await Promise.all([
@@ -4739,6 +4928,7 @@ function PortalApp() {
         .from('free_agent_applications')
         .select('*')
         .order('created_at', { ascending: false }),
+      supabase.from('team_invites').select('*').order('created_at', { ascending: false }),
       supabase.from('team_announcements').select('*').order('created_at', { ascending: false }),
       supabase.from('site_backgrounds').select('*').order('id', { ascending: true }),
     ])
@@ -4766,6 +4956,7 @@ function PortalApp() {
     setMatchAssists((maRes.data ?? []) as MatchAssistRow[])
     setPlayers((plRes.data ?? []) as Player[])
     setFreeAgents((faRes.data ?? []) as FreeAgentApplication[])
+    setTeamInvites((invRes.data ?? []) as TeamInvite[])
     setAnnouncements((annRes.data ?? []) as TeamAnnouncement[])
     setBackgrounds((bgRes.data ?? []) as SiteBackground[])
     setLoading(false)
@@ -4805,10 +4996,8 @@ function PortalApp() {
     : undefined
 
   const canEditActiveMatch =
-    profile?.role === 'admin' ||
-    (!!user &&
-      ((!!activeHomeTeam?.captain_id && activeHomeTeam.captain_id === user.id) ||
-        (!!activeAwayTeam?.captain_id && activeAwayTeam.captain_id === user.id)))
+    isTeamManager(user, profile, activeHomeTeam) ||
+    isTeamManager(user, profile, activeAwayTeam)
 
   const ctx: PortalContext = {
     user,
@@ -4822,6 +5011,7 @@ function PortalApp() {
     matchAssists,
     players,
     freeAgents,
+    teamInvites,
     announcements,
     backgrounds,
     loading,
@@ -4831,6 +5021,7 @@ function PortalApp() {
       setAuthModalOpen(true)
     },
     openMatchModal: (matchId: number) => setActiveMatchId(matchId),
+    askConfirm: (req: ConfirmRequest) => setConfirmReq(req),
   }
 
   return (
@@ -4849,10 +5040,12 @@ function PortalApp() {
                 teams={teams}
                 players={players}
                 applications={freeAgents}
+                teamInvites={teamInvites}
                 matchGoals={matchGoals}
                 matchAssists={matchAssists}
                 refreshAll={refreshAll}
                 openAuthModal={() => ctx.openAuthModal('login')}
+                askConfirm={ctx.askConfirm}
               />
             }
           />
@@ -4889,6 +5082,25 @@ function PortalApp() {
         canEdit={canEditActiveMatch}
         onClose={() => setActiveMatchId(null)}
         onSaved={refreshAll}
+      />
+      <ConfirmModal
+        open={!!confirmReq}
+        title={confirmReq?.title ?? ''}
+        message={confirmReq?.message ?? ''}
+        confirmLabel={confirmReq?.confirmLabel}
+        tone={confirmReq?.tone}
+        busy={confirmBusy}
+        onCancel={() => !confirmBusy && setConfirmReq(null)}
+        onConfirm={async () => {
+          if (!confirmReq) return
+          setConfirmBusy(true)
+          try {
+            await confirmReq.onConfirm()
+          } finally {
+            setConfirmBusy(false)
+            setConfirmReq(null)
+          }
+        }}
       />
     </BrowserRouter>
   )

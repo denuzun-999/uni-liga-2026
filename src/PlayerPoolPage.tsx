@@ -4,9 +4,12 @@ import type { User } from '@supabase/supabase-js'
 import {
   Award,
   CheckCircle2,
+  Clock,
   Filter,
   LogIn,
+  Mail,
   Search,
+  Send,
   Shield,
   Target,
   UserPlus,
@@ -30,6 +33,7 @@ export type PoolTeam = {
   name: string
   short_name: string | null
   captain_id: string | null
+  co_captain_id?: string | null
 }
 
 export type PoolPlayer = {
@@ -52,6 +56,23 @@ export type FreeAgentApplication = {
   note: string | null
   status: 'open' | 'accepted' | 'withdrawn'
   created_at: string
+}
+
+export type TeamInvite = {
+  id: number
+  team_id: number
+  player_id: number
+  invited_by: string
+  status: 'pending' | 'accepted' | 'declined' | 'cancelled'
+  created_at: string
+}
+
+export type ConfirmRequest = {
+  title: string
+  message: string
+  confirmLabel?: string
+  tone?: 'danger' | 'warning'
+  onConfirm: () => Promise<void> | void
 }
 
 const POSITIONS = [
@@ -91,10 +112,12 @@ export default function PlayerPoolPage({
   teams,
   players,
   applications,
+  teamInvites,
   matchGoals,
   matchAssists,
   refreshAll,
   openAuthModal,
+  askConfirm,
 }: {
   user: User | null
   isAdmin: boolean
@@ -102,10 +125,12 @@ export default function PlayerPoolPage({
   teams: PoolTeam[]
   players: PoolPlayer[]
   applications: FreeAgentApplication[]
+  teamInvites: TeamInvite[]
   matchGoals: MatchGoalRow[]
   matchAssists: MatchAssistRow[]
   refreshAll: () => Promise<void>
   openAuthModal: () => void
+  askConfirm: (req: ConfirmRequest) => void
 }) {
   const [activeTab, setActiveTab] = useState<'all' | 'free_agents'>('all')
 
@@ -131,7 +156,7 @@ export default function PlayerPoolPage({
   const managedTeams = useMemo(() => {
     if (!user) return []
     if (isAdmin) return teams
-    return teams.filter((t) => t.captain_id === user.id)
+    return teams.filter((t) => t.captain_id === user.id || t.co_captain_id === user.id)
   }, [user, isAdmin, teams])
 
   const myPlayer = useMemo(() => {
@@ -171,6 +196,24 @@ export default function PlayerPoolPage({
       : managedTeams.length > 0
         ? managedTeams[0].id
         : null
+
+  const myPendingInvites = useMemo(() => {
+    if (!myPlayer || myPlayer.team_id !== null) return []
+    return teamInvites.filter(
+      (inv) => inv.player_id === myPlayer.id && inv.status === 'pending'
+    )
+  }, [myPlayer, teamInvites])
+
+  const pendingInviteByPlayerForTargetTeam = useMemo(() => {
+    const map = new Map<number, TeamInvite>()
+    if (!effectiveRecruitTeamId) return map
+    for (const inv of teamInvites) {
+      if (inv.team_id === effectiveRecruitTeamId && inv.status === 'pending') {
+        map.set(inv.player_id, inv)
+      }
+    }
+    return map
+  }, [teamInvites, effectiveRecruitTeamId])
 
   const filteredAllPlayers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
@@ -320,31 +363,88 @@ export default function PlayerPoolPage({
     }
   }
 
-  async function handleWithdraw(appId: number) {
+  function handleWithdraw(appId: number) {
+    askConfirm({
+      title: 'Withdraw Application?',
+      message: 'Are you sure you want to withdraw your free agent application?',
+      confirmLabel: 'Yes, Withdraw',
+      tone: 'warning',
+      onConfirm: async () => {
+        setBusy(true)
+        setErrorMsg(null)
+        setInfoMsg(null)
+
+        const { error } = await supabase
+          .from('free_agent_applications')
+          .update({ status: 'withdrawn' })
+          .eq('id', appId)
+
+        if (error) setErrorMsg(error.message)
+        else {
+          setInfoMsg('Application withdrawn.')
+          await refreshAll()
+        }
+        setBusy(false)
+      },
+    })
+  }
+
+  async function handleSendInvite(player: PoolPlayer) {
+    if (!user || !effectiveRecruitTeamId) {
+      setErrorMsg('No team available to send an invite from.')
+      return
+    }
+    const targetTeam = teamMap.get(effectiveRecruitTeamId)
+
     setBusy(true)
     setErrorMsg(null)
     setInfoMsg(null)
 
-    const { error } = await supabase
-      .from('free_agent_applications')
-      .update({ status: 'withdrawn' })
-      .eq('id', appId)
+    const { error } = await supabase.from('team_invites').insert({
+      team_id: effectiveRecruitTeamId,
+      player_id: player.id,
+      invited_by: user.id,
+      status: 'pending',
+    })
 
-    if (error) setErrorMsg(error.message)
-    else {
-      setInfoMsg('Application withdrawn.')
+    if (error) {
+      setErrorMsg(`Could not send invite: ${error.message}`)
+    } else {
+      setInfoMsg(
+        `Invite sent to ${player.full_name} for "${targetTeam?.name ?? 'Team'}".`
+      )
       await refreshAll()
     }
     setBusy(false)
   }
 
-  async function handleRecruitPlayer(app: FreeAgentApplication) {
-    if (!effectiveRecruitTeamId) {
-      setErrorMsg('No team available to recruit into.')
-      return
-    }
-    const targetTeam = teamMap.get(effectiveRecruitTeamId)
-    const targetPlayer = playerMap.get(app.player_id)
+  function handleCancelInvite(inv: TeamInvite, playerName: string) {
+    askConfirm({
+      title: 'Cancel Team Invite?',
+      message: `Cancel the pending invite sent to ${playerName}?`,
+      confirmLabel: 'Cancel Invite',
+      tone: 'warning',
+      onConfirm: async () => {
+        setBusy(true)
+        setErrorMsg(null)
+        setInfoMsg(null)
+        const { error } = await supabase
+          .from('team_invites')
+          .update({ status: 'cancelled' })
+          .eq('id', inv.id)
+        if (error) setErrorMsg(error.message)
+        else {
+          setInfoMsg(`Invite to ${playerName} cancelled.`)
+          await refreshAll()
+        }
+        setBusy(false)
+      },
+    })
+  }
+
+  async function handleAcceptInvite(inv: TeamInvite) {
+    if (!myPlayer) return
+    const targetTeam = teamMap.get(inv.team_id)
 
     setBusy(true)
     setErrorMsg(null)
@@ -353,33 +453,65 @@ export default function PlayerPoolPage({
     try {
       const { error: plErr } = await supabase
         .from('players')
-        .update({
-          team_id: effectiveRecruitTeamId,
-          position: targetPlayer?.position || app.preferred_position || 'Midfielder',
-        })
-        .eq('id', app.player_id)
+        .update({ team_id: inv.team_id })
+        .eq('id', myPlayer.id)
+      if (plErr) throw new Error(plErr.message)
 
-      if (plErr) throw new Error(`Could not add player to squad: ${plErr.message}`)
+      const { error: invErr } = await supabase
+        .from('team_invites')
+        .update({ status: 'accepted' })
+        .eq('id', inv.id)
+      if (invErr) throw new Error(invErr.message)
 
-      const { error: appErr } = await supabase
+      await supabase
+        .from('team_invites')
+        .update({ status: 'declined' })
+        .eq('player_id', myPlayer.id)
+        .eq('status', 'pending')
+        .neq('id', inv.id)
+
+      await supabase
         .from('free_agent_applications')
         .update({ status: 'accepted' })
-        .eq('id', app.id)
+        .eq('player_id', myPlayer.id)
+        .eq('status', 'open')
 
-      if (appErr) throw new Error(appErr.message)
-
-      setInfoMsg(
-        `${targetPlayer?.full_name ?? 'Player'} has been added to "${targetTeam?.name ?? 'Team'}"!`
-      )
+      setInfoMsg(`You have joined "${targetTeam?.name ?? 'Team'}"!`)
       await refreshAll()
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Could not complete transfer')
+      setErrorMsg(err instanceof Error ? err.message : 'Could not accept invite')
     } finally {
       setBusy(false)
     }
   }
 
+  function handleDeclineInvite(inv: TeamInvite) {
+    const teamName = teamMap.get(inv.team_id)?.name ?? 'this team'
+    askConfirm({
+      title: 'Decline Team Invite?',
+      message: `Are you sure you want to decline the invite from "${teamName}"?`,
+      confirmLabel: 'Yes, Decline',
+      tone: 'warning',
+      onConfirm: async () => {
+        setBusy(true)
+        setErrorMsg(null)
+        setInfoMsg(null)
+        const { error } = await supabase
+          .from('team_invites')
+          .update({ status: 'declined' })
+          .eq('id', inv.id)
+        if (error) setErrorMsg(error.message)
+        else {
+          setInfoMsg(`Invite from "${teamName}" declined.`)
+          await refreshAll()
+        }
+        setBusy(false)
+      },
+    })
+  }
+
   const myCurrentTeam = myPlayer?.team_id ? teamMap.get(myPlayer.team_id) : null
+  const canInvite = managedTeams.length > 0 && effectiveRecruitTeamId !== null
 
   return (
     <div className="space-y-8">
@@ -396,37 +528,104 @@ export default function PlayerPoolPage({
             Player Pool
           </h1>
           <p className="text-sm text-slate-400">
-            All squad players are automatically listed here; players looking for a team appear in a separate tab.
+            All players are listed here. Free agents can apply or receive direct team invites from captains.
           </p>
         </div>
 
-        <div className="relative z-10 inline-flex rounded-xl border border-white/10 bg-[#070D1B] p-1 self-start">
-          <button
-            type="button"
-            onClick={() => setActiveTab('all')}
-            className={`px-4 py-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
-              activeTab === 'all'
-                ? 'bg-white text-[#0B1120] shadow-xs'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" />
-            All Players ({players.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('free_agents')}
-            className={`px-4 py-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
-              activeTab === 'free_agents'
-                ? 'bg-[#D50C2F] text-white shadow-xs'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <UserPlus className="w-3.5 h-3.5" />
-            Looking for a Team ({totalOpenApplicationsCount})
-          </button>
+        <div className="relative z-10 flex flex-wrap items-center gap-3 self-start">
+          {managedTeams.length > 1 && (
+            <select
+              value={effectiveRecruitTeamId ?? ''}
+              onChange={(e) => setRecruitTeamId(Number(e.target.value))}
+              className="bg-[#070D1B] border border-slate-700/80 rounded-xl px-3 py-2 text-xs font-medium text-slate-200"
+            >
+              {managedTeams.map((t) => (
+                <option key={t.id} value={t.id} className="bg-[#0B1120] text-white">
+                  Inviting as: {t.name}
+                </option>
+              ))}
+            </select>
+          )}
+
+          <div className="inline-flex rounded-xl border border-white/10 bg-[#070D1B] p-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab('all')}
+              className={`px-4 py-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
+                activeTab === 'all'
+                  ? 'bg-white text-[#0B1120] shadow-xs'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Users className="w-3.5 h-3.5" />
+              All Players ({players.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('free_agents')}
+              className={`px-4 py-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
+                activeTab === 'free_agents'
+                  ? 'bg-[#D50C2F] text-white shadow-xs'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              Looking for a Team ({totalOpenApplicationsCount})
+            </button>
+          </div>
         </div>
       </div>
+
+      {/* Pending Invites for Current User */}
+      {myPendingInvites.length > 0 && (
+        <section className={`rounded-2xl p-5 sm:p-6 space-y-3 border-emerald-400/40 ${DARK_CARD}`}>
+          <PoolGlow />
+          <div className="relative z-10 flex items-center gap-2 text-emerald-300 font-bold text-sm">
+            <Mail className="w-4 h-4" />
+            You have {myPendingInvites.length} pending team invite
+            {myPendingInvites.length > 1 ? 's' : ''}!
+          </div>
+          <div className="relative z-10 space-y-2.5">
+            {myPendingInvites.map((inv) => {
+              const tm = teamMap.get(inv.team_id)
+              return (
+                <div
+                  key={inv.id}
+                  className="bg-white/[0.06] border border-white/15 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div className="text-sm text-slate-200">
+                    <Link
+                      to={`/teams/${inv.team_id}`}
+                      className="font-bold text-white hover:text-rose-400"
+                    >
+                      {tm?.name ?? `Team #${inv.team_id}`}
+                    </Link>{' '}
+                    invited you to join their squad.
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => handleAcceptInvite(inv)}
+                      className="bg-[#16A34A] hover:bg-emerald-700 disabled:opacity-50 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1 cursor-pointer transition"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Accept
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => handleDeclineInvite(inv)}
+                      className="bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/30 text-rose-300 px-3.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1 cursor-pointer transition"
+                    >
+                      <XCircle className="w-3.5 h-3.5" /> Decline
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      )}
 
       {errorMsg && (
         <div className="bg-red-500/15 border border-red-400/40 text-red-200 px-5 py-3.5 rounded-2xl text-sm font-medium">
@@ -504,14 +703,18 @@ export default function PlayerPoolPage({
                   const tm = pl.team_id ? teamMap.get(pl.team_id) : null
                   const goals = goalCountByPlayer.get(pl.id) ?? 0
                   const assists = assistCountByPlayer.get(pl.id) ?? 0
+                  const existingInvite = pendingInviteByPlayerForTargetTeam.get(pl.id)
+                  const isFreeAgent = pl.team_id === null
 
                   return (
-                    <Link
+                    <div
                       key={pl.id}
-                      to={`/players/${pl.id}`}
                       className="group border border-white/10 hover:border-rose-500/60 rounded-2xl p-4 bg-white/[0.04] hover:bg-white/[0.08] transition flex flex-col justify-between gap-4"
                     >
-                      <div className="flex items-center gap-3.5 min-w-0">
+                      <Link
+                        to={`/players/${pl.id}`}
+                        className="flex items-center gap-3.5 min-w-0"
+                      >
                         <div className="w-12 h-12 rounded-full bg-slate-800 border border-white/20 overflow-hidden flex items-center justify-center shrink-0">
                           {pl.photo_url ? (
                             <img
@@ -536,7 +739,7 @@ export default function PlayerPoolPage({
                             {pl.jersey_number ? ` · #${pl.jersey_number}` : ''}
                           </div>
                         </div>
-                      </div>
+                      </Link>
 
                       <div className="flex items-center justify-between gap-2 pt-3 border-t border-white/10 text-xs">
                         {tm ? (
@@ -565,7 +768,37 @@ export default function PlayerPoolPage({
                           </span>
                         </div>
                       </div>
-                    </Link>
+
+                      {canInvite && isFreeAgent && (
+                        <div className="pt-2 border-t border-white/10 flex items-center justify-between gap-2">
+                          {existingInvite ? (
+                            <>
+                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-300">
+                                <Clock className="w-3.5 h-3.5" /> Invite Pending
+                              </span>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleCancelInvite(existingInvite, pl.full_name)}
+                                className="text-[11px] font-semibold text-rose-400 hover:underline cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleSendInvite(pl)}
+                              className="w-full bg-[#16A34A] hover:bg-emerald-700 disabled:opacity-50 text-white py-2 px-3 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition cursor-pointer"
+                            >
+                              <Send className="w-3.5 h-3.5" />
+                              Invite to {teamMap.get(effectiveRecruitTeamId!)?.short_name || teamMap.get(effectiveRecruitTeamId!)?.name}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   )
                 })}
               </div>
@@ -759,23 +992,6 @@ export default function PlayerPoolPage({
                     </option>
                   ))}
                 </select>
-
-                {managedTeams.length > 1 && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400">Target Team:</span>
-                    <select
-                      value={effectiveRecruitTeamId ?? ''}
-                      onChange={(e) => setRecruitTeamId(Number(e.target.value))}
-                      className="bg-[#070D1B] border border-slate-700/80 rounded-xl px-3 py-2 text-xs font-medium text-slate-200"
-                    >
-                      {managedTeams.map((t) => (
-                        <option key={t.id} value={t.id} className="bg-[#0B1120] text-white">
-                          {t.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
               </div>
             </div>
 
@@ -791,7 +1007,7 @@ export default function PlayerPoolPage({
                     const lg = leagueMap.get(app.league_id)
                     const careerGoals = goalCountByPlayer.get(app.player_id) ?? 0
                     const careerAssists = assistCountByPlayer.get(app.player_id) ?? 0
-                    const canRecruit = managedTeams.length > 0 && effectiveRecruitTeamId !== null
+                    const existingInvite = pendingInviteByPlayerForTargetTeam.get(app.player_id)
 
                     return (
                       <div
@@ -842,22 +1058,38 @@ export default function PlayerPoolPage({
                           </p>
                         )}
 
-                        {canRecruit && (
+                        {canInvite && pl && (
                           <div className="pt-3 border-t border-white/10 flex items-center justify-between gap-2">
                             <span className="text-xs text-slate-400">
                               Target:{' '}
                               <strong className="text-white">
-                                {teamMap.get(effectiveRecruitTeamId)?.name}
+                                {teamMap.get(effectiveRecruitTeamId!)?.name}
                               </strong>
                             </span>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleRecruitPlayer(app)}
-                              className="bg-[#16A34A] hover:bg-emerald-700 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer"
-                            >
-                              <UserPlus className="w-3.5 h-3.5" /> Add to Squad
-                            </button>
+                            {existingInvite ? (
+                              <div className="flex items-center gap-2.5">
+                                <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-300">
+                                  <Clock className="w-3.5 h-3.5" /> Invited
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleCancelInvite(existingInvite, pl.full_name)}
+                                  className="text-xs font-semibold text-rose-400 hover:underline cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleSendInvite(pl)}
+                                className="bg-[#16A34A] hover:bg-emerald-700 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer"
+                              >
+                                <Send className="w-3.5 h-3.5" /> Send Invite
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
